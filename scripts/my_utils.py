@@ -171,34 +171,6 @@ def get_merge_lora_info(model_id) -> bool:
         return False
     return True
 
-def process_dataset(model_id: str, dataset_path: str):   
-    # Load the dataset  
-    data_all = load_dataset('json', data_files=dataset_path, split='all')   
-    tokenizer = AutoTokenizer.from_pretrained(model_id)  
-    logger.info(data_all)  
-
-    def tokenize_text(row):  
-        # Create a combined text from the row values  
-        combined_text = ' '.join(str(value) for value in row.values() if value is not None)  
-        inputs = tokenizer(  
-            combined_text,  
-            return_tensors="pt",  
-            # padding=True,  # Enable padding if required  
-            # truncation=True  # Truncate if necessary  
-        )  
-        token_len = inputs['input_ids'].size(1)  # Get the length of the first item  
-        return {"token_len": token_len}  # Ensure this returns a dictionary  
-
-    # Apply the function to the dataset with multiprocessing  
-    data_all = data_all.map(tokenize_text, num_proc=multiprocessing.cpu_count(), load_from_cache_file=False)  
-
-    logger.info(data_all)  
-    logger.info(data_all[0])  
-
-    num_rows = data_all.num_rows  # Total number of rows  
-   
-    return num_rows
-
 def get_batch_checkpointing_info(model_size: int, sequence_len: int) -> tuple[int, int, bool]:
     if model_size >= 13_000_000_000:
         gradient_checkpointing = True
