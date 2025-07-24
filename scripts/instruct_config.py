@@ -12,8 +12,6 @@ def make_config(
     model_conf: dict,
     dataset_num_rows: int,
 ):
-    if node_status_info_dict is None:
-        node_status_info_dict = {}
     # model_size = max(cst.MIN_MODEL_SIZE, model_size)
     # logger.info(f'updated model size: {model_size}')
     #################### output
