@@ -8,8 +8,9 @@ def get_public_ip():
     else:  
         return None  
 NUM_GPUS=torch.cuda.device_count()
-public_ip = get_public_ip()  
-NODE_URL = f"http://{public_ip}"
+# public_ip = get_public_ip()  
+# NODE_URL = f"http://{public_ip}"
+NODE_URL = f"xxx"
 SERVER_URL=f""
 
 MAX_EPOCHS = 10

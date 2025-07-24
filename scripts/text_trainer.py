@@ -187,9 +187,9 @@ def create_config(
     model_config = get_model_architecture(model_path)
     dataset_num_rows = process_dataset(model, dataset)
     remained_minutes = hours_to_complete * 60 - 15
-
+    config_updated = {}
     if isinstance(dataset_type, InstructTextDatasetType):
-        config = make_instruct_config(
+        config_updated = make_instruct_config(
             model_id=model,
             model_size=model_size,
             remained_minutes=remained_minutes,
@@ -197,7 +197,7 @@ def create_config(
             dataset_num_rows=dataset_num_rows,
         )
     elif isinstance(dataset_type, ChatTemplateDatasetType):
-        config = make_chat_config(
+        config_updated = make_chat_config(
             model_id=model,
             model_size=model_size,
             remained_minutes=remained_minutes,
@@ -205,7 +205,7 @@ def create_config(
             dataset_num_rows=dataset_num_rows,
         )
     elif isinstance(dataset_type, DpoDatasetType):
-        config =make_dpo_config(
+        config_updated =make_dpo_config(
             model_id=model,
             model_size=model_size,
             remained_minutes=remained_minutes,
@@ -213,7 +213,7 @@ def create_config(
             dataset_num_rows=dataset_num_rows,
         )
     elif isinstance(dataset_type, GrpoDatasetType):
-        config = make_grpo_config(
+        config_updated = make_grpo_config(
             model_id=model,
             model_size=model_size,
             remained_minutes=remained_minutes,
@@ -223,7 +223,8 @@ def create_config(
         )
     else:
         logger.error(f'❌❌❌Unknown task type !!!!! ❌❌❌')
-
+    for key, item in config_updated.items():
+        config[key] = item
     config_path = os.path.join("/workspace/axolotl/configs", f"{task_id}.yml")
     save_config(config, config_path)
     return config_path
@@ -382,7 +383,7 @@ def run_training(config_path, model_id, hours_to_complete):
                         shutil.rmtree(item_path)
                     else:
                         os.remove(item_path)
-        os.remove(config_path)
+        # os.remove(config_path)
     except subprocess.CalledProcessError as e:
         print("Training subprocess failed!", flush=True)
         print(f"Exit Code: {e.returncode}", flush=True)

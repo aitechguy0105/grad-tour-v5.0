@@ -19,32 +19,32 @@ logger = get_logger(__name__)
 
 def get_model_size(model_id):
  
-    url = f"https://huggingface.co/api/models/{model_id}"  
-    max_retries = 3
-    retry_delay = 5
-    b_request_success = False
-    for attempt in range(max_retries):  
-        try:  
-            response = requests.get(url, timeout=10) 
-            b_request_success = True 
-            break
-        except Exception as e:  
-            # Log the error  
-            logger(f"Attempt {attempt + 1} failed: {e}")  
-            if attempt < max_retries - 1:  # Check if there are more retries available  
-                logger(f"Retrying in {retry_delay} seconds...")  
-                time.sleep(retry_delay)  # Wait before the next attempt  
-            else:  
-                logger("Max retries reached. request failed.")  # Inform user of failure  
-    if b_request_success and response.ok:  
-        model_details = response.json()  
-        if 'safetensors' in model_details:
-            return model_details['safetensors']['total']
+    # url = f"https://huggingface.co/api/models/{model_id}"  
+    # max_retries = 3
+    # retry_delay = 5
+    # b_request_success = False
+    # for attempt in range(max_retries):  
+    #     try:  
+    #         response = requests.get(url, timeout=10) 
+    #         b_request_success = True 
+    #         break
+    #     except Exception as e:  
+    #         # Log the error  
+    #         logger(f"Attempt {attempt + 1} failed: {e}")  
+    #         if attempt < max_retries - 1:  # Check if there are more retries available  
+    #             logger(f"Retrying in {retry_delay} seconds...")  
+    #             time.sleep(retry_delay)  # Wait before the next attempt  
+    #         else:  
+    #             logger("Max retries reached. request failed.")  # Inform user of failure  
+    # if b_request_success and response.ok:  
+    #     model_details = response.json()  
+    #     if 'safetensors' in model_details:
+    #         return model_details['safetensors']['total']
             
-        else:
-            logger("No Safetensor parameter size")
-    else:  
-        logger(f"Error retrieving model details:, {response.status_code}")
+    #     else:
+    #         logger("No Safetensor parameter size")
+    # else:  
+    #     logger(f"Error retrieving model details:, {response.status_code}")
     pattern = r"(\d+(\.\d+)?)([mMbB])"
     match = re.search(pattern, model_id)  
     if match:  
@@ -61,11 +61,11 @@ def get_model_size(model_id):
             return size
                         
         except ValueError as e:  
-            logger(f"Error converting size for {model_id}: {e}")  
+            logger.info(f"Error converting size for {model_id}: {e}")  
             return None
     if 'tiny' in model_id:
         return 1_000_000_000
-    logger(f"No size found for {model_id}")  
+    logger.info(f"No size found for {model_id}")  
     return None
 def get_model_architecture(model_id):
     
@@ -77,9 +77,9 @@ def get_model_architecture(model_id):
         with open(local_path, 'r', encoding='utf-8') as file:  
             config_dict = json.load(file)  
     else:
-        logger(f'======= No file: {local_path}')
+        logger.info(f'======= No file: {local_path}')
             
-    logger(f"== model architecture: {config_dict}")
+    logger.info(f"== model architecture: {config_dict}")
     return config_dict
 def process_dataset(model_id: str, dataset_path: str):   
     # Load the dataset  
@@ -162,31 +162,14 @@ def cleanup_gpu_proc(proc):
         logger.error(f"Failed to clean up GPU: {str(e)}")
         return False
     
-def get_merge_lora_info(self, model_id) -> bool:  
+def get_merge_lora_info(model_id) -> bool:  
         
-        try:  
-            response = requests.post(  
-                f"{my_cst.NODE_URL}/merge-lora",  
-                json={
-                    "model": model_id
-                },  # Use json instead of data for proper content type  
-                timeout=10
-            )  
-            response.raise_for_status()  # Raise an error for bad responses  
-            result = response.json()  # Return the JSON response 
-            logger.info(f'b_merge_lora: {result}')  
-            if 'b_merge_lora'  in result:
-                return result['b_merge_lora']
-        except requests.exceptions.Timeout:  
-            logger.error("Request timed out while getting b_merge_lora.")  
-        except requests.exceptions.ConnectionError:  
-            logger.error("Connection error occurred while getting b_merge_lora.")  
-        except requests.exceptions.HTTPError as http_err:  
-            logger.error(f"HTTP error occurred: {http_err}")  
-        except requests.exceptions.RequestException as req_err:  
-            logger.error(f"An error occurred while getting b_merge_lora: {req_err}")  
-        except Exception as req_err:  
-            logger.error(f"Unexpected while getting b_merge_lora: {req_err}")
+    model_size = get_model_size(model_id)
+    if model_size is None:
+        return True
+    if model_size > my_cst.BIG_MODEL_SIZE:
+        return False
+    return True
 
 def process_dataset(model_id: str, dataset_path: str):   
     # Load the dataset  
