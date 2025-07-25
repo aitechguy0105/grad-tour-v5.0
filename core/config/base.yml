@@ -70,3 +70,4 @@ val_set_size: 0.05
 warmup_steps: 50
 weight_decay: 0.0
 xformers_attention: null
+trust_remote_code: False

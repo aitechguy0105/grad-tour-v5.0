@@ -36,7 +36,7 @@ from miner.logic.job_handler import create_reward_funcs_file
 
 from datetime import datetime, timedelta
 
-from scripts.my_utils import get_model_size, get_model_architecture, process_dataset, send_request_post_sync_with_retry, cleanup_gpu_proc, get_merge_lora_info
+from scripts.my_utils import get_model_size, get_model_architecture, process_dataset, send_request_post_sync_with_retry, cleanup_gpu_proc, get_merge_lora_info, remove_contents_in_dir
 import scripts.my_constants as my_cst
 from scripts.grpo_config import make_config as make_grpo_config
 from scripts.dpo_config import make_config as make_dpo_config
@@ -142,18 +142,6 @@ def create_config(
     config = update_flash_attention(config, model)
 
 
-
-    if isinstance(dataset_type, DpoDatasetType):
-        config["rl"] = "dpo"
-    elif isinstance(dataset_type, GrpoDatasetType):
-        filename, reward_funcs_names = create_reward_funcs_file(
-            [reward_function.reward_func for reward_function in dataset_type.reward_functions],
-            task_id,
-            destination_dir="/workspace/axolotl/src/",
-        )
-        config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
-        config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
-
     if not disable_upload:
         hf_username = huggingface_username or os.environ.get("HUGGINGFACE_USERNAME", "rayonlabs")
         os.environ["HUGGINGFACE_USERNAME"] = hf_username
@@ -223,8 +211,29 @@ def create_config(
         )
     else:
         logger.error(f'❌❌❌Unknown task type !!!!! ❌❌❌')
+
+
     for key, item in config_updated.items():
         config[key] = item
+
+    if isinstance(dataset_type, DpoDatasetType):
+        config["rl"] = "dpo"
+    elif isinstance(dataset_type, GrpoDatasetType):
+        filename, reward_funcs_names = create_reward_funcs_file(
+            [reward_function.reward_func for reward_function in dataset_type.reward_functions],
+            task_id,
+            destination_dir="/workspace/axolotl/src/",
+        )
+        config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
+        config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
+
+    config['max_steps'] = 200
+    config['save_steps'] = 5
+    config['eval_steps'] = 5
+    config['val_set_size'] = 0.0001
+    # config['micro_batch_size'] = 2
+    # config['eval_batch_size'] = 2
+
     config_path = os.path.join("/workspace/axolotl/configs", f"{task_id}.yml")
     save_config(config, config_path)
     return config_path
@@ -260,20 +269,22 @@ def run_training(config_path, model_id, hours_to_complete):
     b_overtime_training = False
     try:
         print("Starting training subprocess...\n", flush=True)
+        current_job_train_limit_at = datetime.utcnow() + timedelta(hours=hours_to_complete, minutes=-15)
+        # current_job_train_limit_at = datetime.utcnow() + timedelta(seconds=500)
+        logger.info(f'current_job_train_limit_at; {current_job_train_limit_at}')
+        
         process = subprocess.Popen(
             training_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            # stdout=subprocess.PIPE,
+            # stderr=subprocess.STDOUT,
+            # text=True,
+            # bufsize=1,
             env=training_env
         )
 
-        for line in process.stdout:
-            print(line, end="", flush=True)
-
-        current_job_train_limit_at = datetime.utcnow() + timedelta(hours=hours_to_complete, minutes=-15)
-        
+        # for line in process.stdout:
+        #     print(line, end="", flush=True)
+        n_cnt = 0
         while process.poll() is None:
             if datetime.utcnow() > current_job_train_limit_at:
                 b_overtime_training = True
@@ -284,15 +295,18 @@ def run_training(config_path, model_id, hours_to_complete):
                     time.sleep(2)
                     process.kill()
                     torch.cuda.empty_cache()
-
+            logger.info(f'Waiting, n_cnt: {n_cnt} to complete...')
+            n_cnt += 1
+            time.sleep(10)  
         return_code = process.wait()
 
         if b_overtime_training:
             logger.error('Training was stopped due to timeout.')
         if b_overtime_training == False:
-            output_model_dir = os.path.abspath('/workspace/axolotl/outputs') 
-            adapter_bin_path = os.path.join(output_model_dir, 'adapter_model.bin')
-            adapter_safetensors_path = os.path.join(output_model_dir, 'adapter_model.safetensors')
+            entries = os.listdir(config['output_dir'])
+            print(entries)
+            adapter_bin_path = os.path.join(config['output_dir'], 'adapter_model.bin')
+            adapter_safetensors_path = os.path.join(config['output_dir'], 'adapter_model.safetensors')
 
             bin_exists = os.path.exists(adapter_bin_path)
             safetensors_exists = os.path.exists(adapter_safetensors_path)
@@ -328,6 +342,7 @@ def run_training(config_path, model_id, hours_to_complete):
 
         print("Training subprocess completed successfully.", flush=True)
         b_merge_lora = get_merge_lora_info(model_id)
+        # b_merge_lora = False
         if b_merge_lora:
             if b_overtime_training and latest_checkpoint_dir is not None:
                 subprocess.run(
@@ -371,18 +386,27 @@ def run_training(config_path, model_id, hours_to_complete):
                     shutil.copy2(s, d)
             shutil.rmtree(src_dir)
         else:
-            dest_dir = config['output_dir']
-            keep_files = ["README.md", "adapter_config.json", "adapter_model.bin", "adapter_model.safetensors", ".gitattributes"]
-            # Iterate over all items in the directory
-            for item in os.listdir(dest_dir):
-                item_path = os.path.join(dest_dir, item)
 
-                # Remove everything except the 'merged' directory
-                if item not in keep_files:
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
+            if b_overtime_training == False:
+                src_dir = config['output_dir']
+                
+                keep_files = ["adapter_config.json", "adapter_model.bin", "adapter_model.safetensors", ".gitattributes"]
+                remove_contents_in_dir(src_dir, keep_files)
+            else:
+                dest_dir = config['output_dir']
+                src_dir = latest_checkpoint_dir
+                remove_contents_in_dir(dest_dir, [os.path.basename(src_dir)])
+                keep_files = ["adapter_config.json", "adapter_model.bin", "adapter_model.safetensors", ".gitattributes"]
+                remove_contents_in_dir(src_dir, keep_files)
+                for item in os.listdir(src_dir):
+                    s = os.path.join(src_dir, item)
+                    d = os.path.join(dest_dir, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
                     else:
-                        os.remove(item_path)
+                        shutil.copy2(s, d)
+                shutil.rmtree(src_dir)
+
         # os.remove(config_path)
     except subprocess.CalledProcessError as e:
         print("Training subprocess failed!", flush=True)

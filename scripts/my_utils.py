@@ -12,7 +12,7 @@ import psutil
 import gc
 from datasets import load_dataset
 from transformers import AutoTokenizer
-
+import shutil
 import scripts.my_constants as my_cst
 from scripts.my_logger import get_logger
 logger = get_logger(__name__)
@@ -418,3 +418,15 @@ def get_train_and_eval_steps_from_data(model_id: str, model_size: int, flash_sup
             default_gradient_checkpointing = False, 
             current_gradient_checkpointing = gradient_checkpointing, 
         )
+def remove_contents_in_dir(src_dir, keep_files=[]):
+                
+    # Iterate over all items in the directory
+    for item in os.listdir(src_dir):
+        item_path = os.path.join(src_dir, item)
+
+        # Remove everything except the 'merged' directory
+        if item not in keep_files:
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)

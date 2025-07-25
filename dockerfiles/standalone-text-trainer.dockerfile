@@ -1,5 +1,9 @@
-FROM axolotlai/axolotl:main-20250724-py3.11-cu126-2.6.0
-
+FROM axolotlai/axolotl:main-py3.11-cu124-2.6.0-vllm
+# FROM axolotlai/axolotl:main-20250724-py3.11-cu126-2.6.0
+# FROM axolotlai/axolotl:main-py3.11-cu124-2.5.1
+# FROM axolotlai/axolotl:main-20250724-py3.11-cu126-2.7.1
+# FROM axolotlai/axolotl:0.11.0.post1-py3.11-cu126-2.7.1
+# FROM axolotlai/axolotl:0.11.0.post1-py3.11-cu128-2.7.1
 # Install core dependencies from pyproject.toml
 RUN pip install mlflow huggingface_hub aiohttp pydantic requests toml \
     "fiber @ git+https://github.com/rayonlabs/fiber.git@2.4.0" \

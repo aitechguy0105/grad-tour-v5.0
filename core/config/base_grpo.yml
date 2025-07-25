@@ -44,13 +44,13 @@ train_on_inputs: false
 group_by_length: false
 bf16: auto
 fp16:
-tf32: false
+tf32: true
 
 gradient_checkpointing: false
 early_stopping_patience:
 resume_from_checkpoint:
 local_rank:
-logging_steps: 1
+logging_steps: 50
 xformers_attention:
 flash_attention: true
 s2_attention:
@@ -61,15 +61,15 @@ wandb_mode: online
 wandb_run: your_name
 wandb_runid: default
 
-hub_model_id:
-hub_repo:
-hub_strategy: checkpoint
-hub_token:
+# hub_model_id:
+# hub_repo:
+# hub_strategy: end
+# hub_token:
 
-
-saves_per_epoch: 4
-warmup_steps: 10
-evals_per_epoch: 4
+trust_remote_code: False
+saves_per_epoch: null
+warmup_steps: 50
+evals_per_epoch: null
 eval_table_size:
 eval_max_new_tokens: 128
 max_steps: 10

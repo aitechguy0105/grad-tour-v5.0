@@ -69,9 +69,9 @@ def make_config(
     logger.info(f'sequence_len: {sequence_len}')
 
     ##################### reward_func, vllm config
-    filename, reward_funcs_names = create_reward_funcs_file(
-        [reward_function.reward_func for reward_function in dataset_type.reward_functions], job_id
-    )
+    # filename, reward_funcs_names = create_reward_funcs_file(
+    #     [reward_function.reward_func for reward_function in dataset_type.reward_functions], job_id
+    # )
     config["trl"] = {
         "beta": 0.04,
         "max_completion_length": 256,
@@ -79,8 +79,8 @@ def make_config(
         "num_generations": 4,
     }
     
-    config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
-    config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
+    # config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
+    # config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
     
     if num_gpus <= 2 or model_size >= my_cst.LARGE_MODEL_SIZE or \
         model_conf.get('num_attention_heads', 2) % 2 == 1 or \
@@ -104,7 +104,7 @@ def make_config(
         if model_conf.get('num_attention_heads', 2) % 4 == 2:
             config["vllm"]["tensor_parallel_size"] = 2
     #################### eval, micro batch size, gradient_checkpointing <- sequence len, model size
-    config["trl"]["use_vllm"] = False
+    # config["trl"]["use_vllm"] = False
     if config["trl"]["use_vllm"]:
         micro_batch_size = 2
         eval_batch_size = 2
@@ -130,7 +130,10 @@ def make_config(
         train_batch_size_total = num_gpus * micro_batch_size * gradient_accumulation_steps
         eval_batch_size_total = num_gpus * eval_batch_size
     logger.info(f'micro_batch_size: {micro_batch_size}, eval_batch_size: {eval_batch_size}, num_gpus: {num_gpus}, train_batch_size_total: {train_batch_size_total}, eval_batch_size_total: {eval_batch_size_total}')
-    
+    num_generations = 4
+    if eval_batch_size_total <= 2:
+        num_generations = 2
+        config["trl"]["num_generations"] = num_generations
     #################### flash attention, eager attention
     flash_attention = True
     model_architecture = None
@@ -240,9 +243,7 @@ def make_config(
     #################### checkpoint_steps, val_set_size
 
 
-    num_generations = 4
-    if eval_batch_size_total <= 2:
-        num_generations = 2
+
     steps_per_epoch = math.ceil(dataset_num_rows * num_generations / train_batch_size_total)
     rough_estimated_total_train_steps = math.ceil(remained_minutes * 60 * train_steps_per_sec)
     if rough_estimated_total_train_steps >= steps_per_epoch * 3:
