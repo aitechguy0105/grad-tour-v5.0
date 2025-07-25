@@ -215,7 +215,7 @@ def create_config(
 
     for key, item in config_updated.items():
         config[key] = item
-
+    logger.info(f'config_updated: {config}')
     if isinstance(dataset_type, DpoDatasetType):
         config["rl"] = "dpo"
     elif isinstance(dataset_type, GrpoDatasetType):
@@ -474,7 +474,8 @@ async def main():
         int(args.hours_to_complete),
         args.expected_repo_name,
     )
-
+    NUM_GPUS=torch.cuda.device_count()
+    print(f"Number of GPUs available: {NUM_GPUS}", flush=True)
     run_training(config_path, args.model, args.hours_to_complete)
 
     patch_model_metadata(output_dir, args.model)
