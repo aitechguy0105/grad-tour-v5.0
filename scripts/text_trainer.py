@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import pathlib
 
 import yaml
 from transformers import AutoTokenizer
@@ -21,6 +22,7 @@ project_root = os.path.dirname(script_dir)
 sys.path.append(project_root)
 
 import trainer.constants as train_cst
+import trainer.utils.training_paths as train_paths
 from core.config.config_handler import create_dataset_entry
 from core.config.config_handler import save_config
 from core.config.config_handler import update_flash_attention
@@ -47,6 +49,31 @@ import time
 import torch
 import re
 logger = get_logger(__name__)
+
+def patch_wandb_symlinks(base_dir:str):
+    for root, _, files in os.walk(base_dir):
+        for name in files:
+            full_path = os.path.join(root, name)
+
+            if os.path.islink(full_path):
+                target_path = os.readlink(full_path)
+
+                print(f"Symlink: {full_path} → {target_path}")
+                try:
+                    os.unlink(full_path)
+                except Exception as e:
+                    print(f"Failed to unlink {full_path}: {e}")
+                    continue
+
+                if os.path.exists(target_path):
+                    print("Copying real file")
+                    try:
+                        shutil.copy(target_path, full_path)
+                    except Exception as e:
+                        print(f"Failed to copy: {e}")
+                else:
+                    print("Target not found, creating dummy")
+                    pathlib.Path(full_path).touch()
 
 def patch_model_metadata(output_dir: str, base_model_id: str):
     try:
@@ -106,7 +133,13 @@ def copy_dataset_if_needed(dataset_path, file_format):
 
         return data_path
     return dataset_path
+def copy_dataset_to_axolotl_directories(dataset_path):
+    dataset_filename = os.path.basename(dataset_path)
+    data_path, root_path = train_paths.get_axolotl_dataset_paths(dataset_filename)
+    shutil.copy(dataset_path, data_path)
+    shutil.copy(dataset_path, root_path)
 
+    return data_path
 
 def create_config(
         task_id, 
@@ -119,49 +152,62 @@ def create_config(
         expected_repo_name=None,
         huggingface_username=None,
         huggingface_token=None,
-        disable_upload=True
+        disable_upload=True,
+        log_wandb=True
     ):
     """Create the axolotl config file with appropriate settings."""
-    if isinstance(dataset_type, InstructTextDatasetType | DpoDatasetType | ChatTemplateDatasetType):
-        config_path = "/workspace/axolotl/base.yml"
-    elif isinstance(dataset_type, GrpoDatasetType):
-        config_path = "/workspace/axolotl/base_grpo.yml"
-    else:
-        raise ValueError(f"Unsupported dataset type: {type(dataset_type)}")
-
+    # if isinstance(dataset_type, InstructTextDatasetType | DpoDatasetType | ChatTemplateDatasetType):
+    #     config_path = "/workspace/axolotl/base.yml"
+    # elif isinstance(dataset_type, GrpoDatasetType):
+    #     config_path = "/workspace/axolotl/base_grpo.yml"
+    # else:
+    #     raise ValueError(f"Unsupported dataset type: {type(dataset_type)}")
+    config_path = train_paths.get_axolotl_base_config_path(dataset_type)
     with open(config_path, "r") as file:
         config = yaml.safe_load(file)
 
     config["datasets"] = [create_dataset_entry(dataset, dataset_type, FileFormat(file_format))]
-    model_path = f"{train_cst.CACHE_PATH}/models/{model.replace('/', '--')}"
+    # model_path = f"{train_cst.CACHE_PATH}/models/{model.replace('/', '--')}"
+    model_path = str(train_paths.get_text_base_model_path(model))
     config["base_model"] = model_path
     config["mlflow_experiment_name"] = dataset
     os.makedirs(output_dir, exist_ok=True)
-    config["output_dir"] = output_dir
-
+    # config["output_dir"] = output_dir
+    config["output_dir"] = str(output_dir)
+    
+    if log_wandb:
+        config["wandb_runid"] = f"{task_id}_{expected_repo_name}"
+        config["wandb_name"] = f"{task_id}_{expected_repo_name}"
+        config["wandb_mode"] = "offline"
+        os.makedirs(train_cst.WANDB_LOGS_DIR, exist_ok=True)
+    else:
+        for key in list(config.keys()):
+            if key.startswith("wandb"):
+                config.pop(key)
     config = update_flash_attention(config, model)
 
 
-    if not disable_upload:
-        hf_username = huggingface_username or os.environ.get("HUGGINGFACE_USERNAME", "rayonlabs")
-        os.environ["HUGGINGFACE_USERNAME"] = hf_username
+    # if not disable_upload:
+    #     hf_username = huggingface_username or os.environ.get("HUGGINGFACE_USERNAME", "rayonlabs")
+    #     os.environ["HUGGINGFACE_USERNAME"] = hf_username
 
-        repo_name = expected_repo_name or str(uuid.uuid4())
-        config["hub_model_id"] = f"{hf_username}/{repo_name}"
+    #     repo_name = expected_repo_name or str(uuid.uuid4())
+    #     config["hub_model_id"] = f"{hf_username}/{repo_name}"
 
-        if huggingface_token:
-            os.environ["HUGGINGFACE_TOKEN"] = huggingface_token
-    else:
-        for key in list(config.keys()):
-            if key.startswith("wandb") or key.startswith("hub"):
-                config.pop(key)
+    #     if huggingface_token:
+    #         os.environ["HUGGINGFACE_TOKEN"] = huggingface_token
+    # else:
+    #     for key in list(config.keys()):
+    #         if key.startswith("wandb") or key.startswith("hub"):
+    #             config.pop(key)
 
     if file_format != FileFormat.HF.value:
         for ds in config["datasets"]:
             ds["ds_type"] = "json"
 
             if "path" in ds:
-                ds["path"] = "/workspace/axolotl/data"
+                # ds["path"] = "/workspace/axolotl/data"
+                ds["path"] = train_cst.AXOLOTL_DIRECTORIES["data"]
 
             ds["data_files"] = [os.path.basename(dataset)]
 
@@ -220,19 +266,21 @@ def create_config(
         filename, reward_funcs_names = create_reward_funcs_file(
             [reward_function.reward_func for reward_function in dataset_type.reward_functions],
             task_id,
-            destination_dir="/workspace/axolotl/src/",
+            # destination_dir="/workspace/axolotl/src/",
+            destination_dir=train_cst.AXOLOTL_DIRECTORIES["src"],
         )
         config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
         config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
 
-    # config['max_steps'] = 200
-    # config['save_steps'] = 5
-    # config['eval_steps'] = 5
-    # config['val_set_size'] = 0.0001
+    config['max_steps'] = 12
+    config['save_steps'] = 5
+    config['eval_steps'] = 5
+    config['val_set_size'] = 0.0001
     # config['micro_batch_size'] = 2
     # config['eval_batch_size'] = 2
 
-    config_path = os.path.join("/workspace/axolotl/configs", f"{task_id}.yml")
+    # config_path = os.path.join("/workspace/axolotl/configs", f"{task_id}.yml")
+    config_path = os.path.join(train_cst.AXOLOTL_DIRECTORIES["configs"], f"{task_id}.yml")
     save_config(config, config_path)
     return config_path
 
@@ -440,10 +488,12 @@ def run_training(config_path, model_id, hours_to_complete):
                 shutil.rmtree(src_dir)
 
         # os.remove(config_path)
-    except subprocess.CalledProcessError as e:
-        print("Training subprocess failed!", flush=True)
-        print(f"Exit Code: {e.returncode}", flush=True)
-        print(f"Command: {' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}", flush=True)
+    except Exception as e:
+        print(f"Training subprocess failed!, {str(e)}", flush=True)
+        if isinstance(e, subprocess.CalledProcessError):
+            print(f"Exit Code: {e.returncode}", flush=True)
+            print(f"Command: {' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}", flush=True)
+        
         # raise RuntimeError(f"Training subprocess failed with exit code {e.returncode}")
         src_dir = config['base_model']
         dest_dir = config['output_dir']
@@ -461,18 +511,20 @@ async def main():
     parser.add_argument("--dataset-type", required=True, help="JSON string of dataset type config")
     parser.add_argument("--task-type", required=True, choices=["InstructTextTask", "DpoTask", "GrpoTask"], help="Type of task")
     parser.add_argument("--file-format", required=True, choices=["csv", "json", "hf", "s3"], help="File format")
-    parser.add_argument("--hours-to-complete", type=float, required=True, help="Number of hours to complete the task")
     parser.add_argument("--expected-repo-name", help="Expected repository name")
+    parser.add_argument("--hours-to-complete", type=float, required=True, help="Number of hours to complete the task")
     args = parser.parse_args()
-
-    for directory in [
-        "/workspace/axolotl/data",
-        "/workspace/axolotl/data_prepared",
-        "/workspace/axolotl/configs",
-        "/workspace/axolotl/outputs",
-        "/workspace/input_data",
-        "/workspace/axolotl"
-    ]:
+    # temp_env = os.environ.copy()
+    # print(f"Environment variables: {temp_env}", flush=True)
+    # for directory in [
+    #     "/workspace/axolotl/data",
+    #     "/workspace/axolotl/data_prepared",
+    #     "/workspace/axolotl/configs",
+    #     "/workspace/axolotl/outputs",
+    #     "/workspace/input_data",
+    #     "/workspace/axolotl"
+    # ]:
+    for directory in train_cst.AXOLOTL_DIRECTORIES.values():
         os.makedirs(directory, exist_ok=True)
     try:
         dataset_type_dict = json.loads(args.dataset_type)
@@ -488,18 +540,22 @@ async def main():
     except Exception as e:
         sys.exit(f"Error creating dataset type object: {e}")
 
-    base_dataset_path = f"{train_cst.CACHE_PATH}/datasets"
-    dataset_path = f"{base_dataset_path}/{args.task_id}_train_data.json" if args.file_format == FileFormat.S3.value else f"{base_dataset_path}/{args.dataset.replace('/', '--')}"
-
-    if args.file_format == FileFormat.S3.value and args.task_type == TaskType.DPOTASK.value:
+    # base_dataset_path = f"{train_cst.CACHE_PATH}/datasets"
+    # dataset_path = f"{base_dataset_path}/{args.task_id}_train_data.json" if args.file_format == FileFormat.S3.value else f"{base_dataset_path}/{args.dataset.replace('/', '--')}"
+    dataset_path = train_paths.get_text_dataset_path(args.task_id)
+    
+    if args.task_type == TaskType.DPOTASK.value:
         adapt_columns_for_dpo_dataset(dataset_path, dataset_type, apply_formatting=True)
-    elif args.file_format == FileFormat.S3.value and args.task_type == TaskType.GRPOTASK.value:
+    elif args.task_type == TaskType.GRPOTASK.value:
         adapt_columns_for_grpo_dataset(dataset_path, dataset_type)
 
-    dataset_path = copy_dataset_if_needed(dataset_path, args.file_format)
+    # dataset_path = copy_dataset_if_needed(dataset_path, args.file_format)
+    dataset_path = copy_dataset_to_axolotl_directories(dataset_path)
 
-    output_dir = f"/workspace/axolotl/outputs/{args.task_id}/{args.expected_repo_name}"
-
+    # output_dir = f"/workspace/axolotl/outputs/{args.task_id}/{args.expected_repo_name}"
+    output_dir = train_paths.get_checkpoints_output_path(args.task_id, args.expected_repo_name)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     config_path = create_config(
         args.task_id,
         args.model,
@@ -509,6 +565,7 @@ async def main():
         output_dir,
         int(args.hours_to_complete),
         args.expected_repo_name,
+        log_wandb=True
     )
     # NUM_GPUS=torch.cuda.device_count()
     # print(f"Number of GPUs available: {NUM_GPUS}", flush=True)
@@ -516,6 +573,7 @@ async def main():
 
     patch_model_metadata(output_dir, args.model)
 
+    patch_wandb_symlinks(train_cst.WANDB_LOGS_DIR)
 
 if __name__ == "__main__":
     asyncio.run(main())
