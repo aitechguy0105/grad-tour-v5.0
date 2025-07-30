@@ -1,6 +1,6 @@
 from scripts.my_logger import get_logger
-import scripts.my_constants as my_cst
-from scripts.my_utils import get_batch_checkpointing_info, get_train_and_eval_steps_from_data
+import scripts.my_constants as cst
+from scripts.my_utils import get_batch_checkpointing_info, get_train_and_eval_steps_from_data, get_flash_attention_info, get_liger_info
 import math
 from datetime import datetime
 logger = get_logger(__name__)
@@ -15,29 +15,32 @@ def make_config(
     # model_size = max(cst.MIN_MODEL_SIZE, model_size)
     # logger.info(f'updated model size: {model_size}')
     #################### output
-    micro_batch_size = my_cst.MIN_MICRO_BATCH_SIZE
-    eval_batch_size = my_cst.MIN_EVAL_BATCH_SIZE
+    micro_batch_size = cst.MIN_MICRO_BATCH_SIZE
+    eval_batch_size = cst.MIN_EVAL_BATCH_SIZE
     gradient_checkpointing = False
-    max_steps = my_cst.MIN_MAX_STEPS
+    max_steps = cst.MIN_MAX_STEPS
     flash_attention = True
-    early_stopping_patience = my_cst.MIN_EARLY_STOPPING_PATIENCE
-    eval_steps = my_cst.DEFAULT_CHECKPOINT_STEPS
-    save_steps = my_cst.DEFAULT_CHECKPOINT_STEPS
+    early_stopping_patience = cst.MIN_EARLY_STOPPING_PATIENCE
+    eval_steps = cst.DEFAULT_CHECKPOINT_STEPS
+    save_steps = cst.DEFAULT_CHECKPOINT_STEPS
     lr_scheduler = 'constant'
     lr_scheduler_kwargs = None
-    sequence_len = my_cst.MIN_SEQUENCE_LEN
-    gradient_accumulation_steps = my_cst.MIN_ACCUMULATION_STEPS
-    num_epochs = my_cst.DEFAULT_NUM_EPOCHS
-    val_set_size = my_cst.DEFAULT_VAL_SET_SIZE
-    learning_rate = my_cst.DEFAULT_LEARNING_RATE
+    sequence_len = cst.MIN_SEQUENCE_LEN
+    gradient_accumulation_steps = cst.MIN_ACCUMULATION_STEPS
+    num_epochs = cst.DEFAULT_NUM_EPOCHS
+    val_set_size = cst.DEFAULT_VAL_SET_SIZE
+    learning_rate = cst.DEFAULT_LEARNING_RATE
     b_maximized = False
     lora_dropout = 0.1
-    num_gpus = my_cst.NUM_GPUS
+    num_gpus = cst.NUM_GPUS
     
     config = {}
     config_to_save = {}
     #################### sequence_len
-
+    if model_conf is None or not isinstance(model_conf, dict):
+        logger.warning(f'model_conf is None return max_steps = -1')
+        config = { "max_steps": -1 }
+        return config
     max_sequence_len = min(4096, model_conf.get('max_position_embeddings', 1024))
     sequence_len = min(1024, max_sequence_len)
     logger.info(f'sequence_len: {sequence_len}')
@@ -55,33 +58,24 @@ def make_config(
     logger.info(f'micro_batch_size: {micro_batch_size}, eval_batch_size: {eval_batch_size}, num_gpus: {num_gpus}, train_batch_size_total: {train_batch_size_total}, eval_batch_size_total: {eval_batch_size_total}')
             
     #################### flash attention, eager attention
-    flash_attention = True
+    flash_attention = get_flash_attention_info(model_id, model_conf)
     model_architecture = None
     if model_conf is not None and isinstance(model_conf, dict):  
         # Check if 'architectures' key exists and is a list  
         architectures = model_conf.get('architectures')  
         if architectures and isinstance(architectures, list):  
             model_architecture = architectures[0]  # Access the first architecture  
-            # Check if 'rope_scaling' exists and is also a dictionary  
-            rope_scaling = model_conf.get('rope_scaling')  
-            if rope_scaling and isinstance(rope_scaling, dict):  
-                rope_type = rope_scaling.get('type')  
-                if rope_type == 'yarn':  
-                    flash_attention = False  
-                    
-            flash_not_support_architectures = ['FalconForCausalLM', 'CodeGenForCausalLM', 'BloomForCausalLM', 'GPTNeoForCausalLM']
-            flash_support_archtectures = ['Qwen2ForCausalLM', 'GPTNeoXForCausalLM']
-            if model_architecture in flash_not_support_architectures:            
-                flash_attention = False
-            elif model_architecture in flash_support_archtectures:   
-                flash_attention = True
-    else:  
-        # Handle the case where model_conf is None or not structured as expected  
-        logger.error("Error: model_conf is not properly defined.")
-        
+    
     #################### train_steps_per_sec, eval_steps_per_sec
 
-    adapter = 'lora' if model_size < my_cst.QLORA_MODEL_SIZE else 'qlora'
+    adapter = 'lora' if model_size < cst.QLORA_MODEL_SIZE else 'qlora'
+
+    if model_architecture == 'GPTNeoXForCausalLM':
+        gradient_checkpointing = False
+        micro_batch_size = 1
+        eval_batch_size = 1
+        gradient_accumulation_steps = 4
+
     train_steps_per_sec, eval_steps_per_sec = get_train_and_eval_steps_from_data(
         model_id = model_id,
         model_size = model_size,
@@ -95,25 +89,25 @@ def make_config(
     )
     #################### checkpoint_steps, val_set_size
 
-    if model_size < my_cst.LARGE_MODEL_SIZE:
-        n_max_val_examples_for_not_large_models = my_cst.MAX_VAL_DATASET_EXAMPLES_INSTRUCT
-        n_min_val_examples_for_not_large_models = my_cst.MIN_VAL_DATASET_EXAMPLES_INSTRUCT
+    if model_size < cst.LARGE_MODEL_SIZE:
+        n_max_val_examples_for_not_large_models = cst.MAX_VAL_DATASET_EXAMPLES_INSTRUCT
+        n_min_val_examples_for_not_large_models = cst.MIN_VAL_DATASET_EXAMPLES_INSTRUCT
         if num_gpus <=2:
             n_max_val_examples_for_not_large_models /= 2
             n_min_val_examples_for_not_large_models /= 2
-        if dataset_num_rows * my_cst.DEFAULT_VAL_SET_SIZE > n_max_val_examples_for_not_large_models:
+        if dataset_num_rows * cst.DEFAULT_VAL_SET_SIZE > n_max_val_examples_for_not_large_models:
             val_set_size = n_max_val_examples_for_not_large_models / dataset_num_rows
-        if dataset_num_rows * my_cst.DEFAULT_VAL_SET_SIZE < n_min_val_examples_for_not_large_models:
+        if dataset_num_rows * cst.DEFAULT_VAL_SET_SIZE < n_min_val_examples_for_not_large_models:
             val_set_size = n_min_val_examples_for_not_large_models / dataset_num_rows
     else:
-        n_max_val_examples_for_large_models = my_cst.MAX_VAL_DATASET_EXAMPLES_INSTRUCT / 2
-        n_min_val_examples_for_large_models = my_cst.MIN_VAL_DATASET_EXAMPLES_INSTRUCT / 2
+        n_max_val_examples_for_large_models = cst.MAX_VAL_DATASET_EXAMPLES_INSTRUCT / 2
+        n_min_val_examples_for_large_models = cst.MIN_VAL_DATASET_EXAMPLES_INSTRUCT / 2
         if num_gpus <=2:
             n_max_val_examples_for_not_large_models /= 2
             n_min_val_examples_for_not_large_models /= 2
-        if dataset_num_rows * my_cst.DEFAULT_VAL_SET_SIZE > n_max_val_examples_for_large_models:
+        if dataset_num_rows * cst.DEFAULT_VAL_SET_SIZE > n_max_val_examples_for_large_models:
             val_set_size = n_max_val_examples_for_large_models / dataset_num_rows
-        if dataset_num_rows * my_cst.DEFAULT_VAL_SET_SIZE < n_min_val_examples_for_large_models:
+        if dataset_num_rows * cst.DEFAULT_VAL_SET_SIZE < n_min_val_examples_for_large_models:
             val_set_size = n_min_val_examples_for_large_models / dataset_num_rows
     val_set_size = max(min(1, val_set_size), 0)
 
@@ -144,7 +138,6 @@ def make_config(
     estimated_epochs = 0
     not_multiplied_estimated_epochs = 0
     checkpoint_times_multiplier = 1.0
-    b_dora_acceptable = False
 
     total_remained_sec_after_first_eval = total_remained_sec - estimated_eval_sec_per_checkpoint
     estimated_train_eval_sec_per_checkpoint = (estimated_eval_sec_per_checkpoint + estimated_train_sec_per_checkpoint) * 1.1
@@ -156,24 +149,30 @@ def make_config(
     logger.info(f'=========== steps_per_epoch: {steps_per_epoch}')
 
     estimated_epochs = max_steps / steps_per_epoch
+
     if estimated_epochs < 3.0 and sequence_len >= 2048:
         logger.warning(f'=========== adjusting sequence_len to 1024, estimated_epochs: {estimated_epochs} is too small, sequence_len: {sequence_len}')
         sequence_len = 1024
-        max_steps = math.ceil(n_estimated_checkpoint_times * 1.5) * checkpoint_steps + 5
+        n_estimated_checkpoint_times = math.ceil(n_estimated_checkpoint_times * 1.5) 
+        max_steps = math.ceil(n_estimated_checkpoint_times * checkpoint_steps) + 5
         logger.info(f'=========== max_steps: {max_steps}')
         estimated_epochs = max_steps / steps_per_epoch
         logger.info(f'=========== estimated_epochs: {estimated_epochs}')
-    if estimated_epochs > my_cst.MAX_EPOCHS:
-        max_steps = math.ceil(n_estimated_checkpoint_times * checkpoint_steps * my_cst.MAX_EPOCHS / estimated_epochs ) + 5
-        estimated_epochs = my_cst.MAX_EPOCHS
-        logger.warning(f'=========== estimated_epochs: {estimated_epochs} is too big, reduce to {my_cst.MAX_EPOCHS}, max_steps: {max_steps}')
-    
+        
+    if estimated_epochs > cst.MAX_EPOCHS:
+        logger.warning(f'=========== estimated_epochs: {estimated_epochs} is too big, reduce to {cst.MAX_EPOCHS}, max_steps: {max_steps}')
+        n_estimated_checkpoint_times = math.ceil(n_estimated_checkpoint_times * cst.MAX_EPOCHS / estimated_epochs)
+        max_steps = math.ceil(n_estimated_checkpoint_times * checkpoint_steps) + 5
+        estimated_epochs = cst.MAX_EPOCHS
 
     not_multiplied_estimated_epochs = estimated_epochs
     logger.info(f'=========== estimated_epochs: {estimated_epochs}')
 
     if estimated_epochs < 7.0:
         checkpoint_times_multiplier = 1.5
+    elif estimated_epochs < 10.0:
+        checkpoint_times_multiplier = 1.2
+
     n_estimated_checkpoint_times = math.ceil(n_estimated_checkpoint_times * checkpoint_times_multiplier)
     if checkpoint_times_multiplier > 1.0:
         b_maximized = True
@@ -183,17 +182,26 @@ def make_config(
         
         estimated_epochs = max_steps / steps_per_epoch
         logger.info(f'=========== increase estimated_epochs: {estimated_epochs}')
-
-    early_stopping_patience = max( min(math.ceil(steps_per_epoch / checkpoint_steps), 10), my_cst.MIN_EARLY_STOPPING_PATIENCE)
+    if not_multiplied_estimated_epochs <= 3:
+        early_stopping_patience = max( min(math.ceil(steps_per_epoch * 2 / checkpoint_steps), 10), cst.MIN_EARLY_STOPPING_PATIENCE)
+    elif not_multiplied_estimated_epochs <= 7:
+        early_stopping_patience = max( min(math.ceil(steps_per_epoch * 3 / checkpoint_steps), 10), cst.MIN_EARLY_STOPPING_PATIENCE)
+    else:
+        early_stopping_patience = max( min(math.ceil(steps_per_epoch * 5 / checkpoint_steps), 10), cst.MIN_EARLY_STOPPING_PATIENCE)
     
     learning_rate = 1e-4
-
-    if not_multiplied_estimated_epochs <= 1:
+    
+    learning_rate = min(2.0, (1.37885 - 0.394426 * math.log(model_size / 1_000_000_000))) * 1e-4
+    
+    if not_multiplied_estimated_epochs <= 1.0:
         lr_scheduler = 'constant'
-        learning_rate = 1e-4
+        
+        lr_scaler_epochs = 1.2 * (1.0 * (1 - not_multiplied_estimated_epochs) + 1.0)
+        learning_rate= min(2.0 * 1e-4, learning_rate * lr_scaler_epochs)
         
     elif not_multiplied_estimated_epochs <= 1.5:
-        learning_rate = 7e-5
+        lr_scaler_epochs = 1.0
+        learning_rate= min(2.0 * 1e-4, learning_rate * lr_scaler_epochs)
         lr_scheduler = 'cosine_with_min_lr'
         lr_scheduler_kwargs = {
             'min_lr_rate': 0.5
@@ -205,41 +213,30 @@ def make_config(
             'min_lr_rate': 0.1
         }
     elif not_multiplied_estimated_epochs <= 3:
-        learning_rate = 4e-5
+        learning_rate = 5e-5
         lr_scheduler = 'cosine_with_min_lr'
         lr_scheduler_kwargs = {
             'min_lr_rate': 0.05
         }
-    elif not_multiplied_estimated_epochs <= 4:
-        learning_rate = 3e-5
-        lr_scheduler = 'cosine_with_min_lr'
-        lr_scheduler_kwargs = {
-            'min_lr_rate': 0.01
-        }
-    elif not_multiplied_estimated_epochs <= 5:
-        learning_rate = 2.5e-5
-        lr_scheduler = 'cosine_with_min_lr'
-        lr_scheduler_kwargs = {
-            'min_lr_rate': 0.01
-        }
-    elif not_multiplied_estimated_epochs <= 7:
-        learning_rate = 2.5e-5
-        lr_scheduler = 'cosine_with_min_lr'
-        lr_scheduler_kwargs = {
-            'min_lr_rate': 0.01
-        }
     else:
-        learning_rate = 1e-5
+        learning_rate = 5e-5
         lr_scheduler = 'cosine_with_min_lr'
         lr_scheduler_kwargs = {
             'min_lr_rate': 0.01
         }
-   
+    if 'mistral' in model_id.lower() or model_architecture in ['MistralForCausalLM', 'MixtralForCausalLM']:
+        learning_rate = learning_rate / 8.0
     #################### customize lora
 
-    lora_r = 128
-    lora_alpha = 256
-
+    if model_size <= cst.EXTREMELY_SMALL_MODEL_SIZE:
+        lora_r = 512    
+        lora_alpha = 1024
+    elif model_size < cst.LARGE_MODEL_SIZE:
+        lora_r = 256
+        lora_alpha = 512
+    else:
+        lora_r = 128
+        lora_alpha = 256
     optimizer = 'adamw_bnb_8bit'
     
     config['adapter'] = adapter
@@ -270,7 +267,8 @@ def make_config(
             'adam_epsilon': 1e-8
         }
         config['lora_target_linear'] = True
-   
+        if model_size < cst.LARGE_MODEL_SIZE:
+            config['peft_init_lora_weights'] ='eva'
         if 'torch_dtype' in model_conf and model_conf['torch_dtype'] == 'bfloat16':
             config['bf16'] = True
             if adapter == 'qlora':
@@ -291,7 +289,8 @@ def make_config(
             'adam_epsilon': 1e-8
         }
         config['lora_target_linear'] = True
-
+        if model_size < cst.LARGE_MODEL_SIZE:
+            config['peft_init_lora_weights'] ='eva'
         if adapter == 'qlora':
             config['load_in_4bit'] = True
             if 'model_type' in model_conf and model_conf['model_type'] in ['deepseek_v3', 'deepseek_v2']:
@@ -308,9 +307,18 @@ def make_config(
                 'use_reentrant': False
             }
             config['gradient_checkpointing_kwargs'] = gradient_checkpointing_kwargs
+    
+    if get_liger_info(model_conf):
+        config['plugins'] = ['axolotl.integrations.liger.LigerPlugin']
+        config['liger_rope'] = True
+        config['liger_rms_norm'] = True
+        config['liger_glu_activation'] = True
+        config['liger_layer_norm'] = True    
 
+    max_grad_norm = 1.0
     config['num_epochs'] = 10
     config['lora_dropout'] = lora_dropout
+    config['max_grad_norm'] = max_grad_norm
     if 'pythia' in model_id and model_architecture is not None and model_architecture == 'GPTNeoXForCausalLM':
         lora_fan_in_fan_out = True
         config['lora_fan_in_fan_out'] = lora_fan_in_fan_out

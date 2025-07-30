@@ -36,7 +36,7 @@ from miner.logic.job_handler import create_reward_funcs_file
 
 from datetime import datetime, timedelta
 
-from scripts.my_utils import get_model_size, get_model_architecture, process_dataset, send_request_post_sync_with_retry, cleanup_gpu_proc, get_merge_lora_info, remove_contents_in_dir
+from scripts.my_utils import get_model_size, get_model_architecture, process_dataset, send_request_post_sync_with_retry, cleanup_gpu_proc, get_merge_lora_info, remove_contents_in_dir, copy_contents_to_dir
 import scripts.my_constants as my_cst
 from scripts.grpo_config import make_config as make_grpo_config
 from scripts.dpo_config import make_config as make_dpo_config
@@ -169,8 +169,6 @@ def create_config(
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         config["special_tokens"] = {"pad_token": tokenizer.eos_token}
 
-    current_at = datetime.utcnow()
-
     model_size = get_model_size(model)
     model_config = get_model_architecture(model_path)
     dataset_num_rows = process_dataset(model, dataset)
@@ -193,7 +191,7 @@ def create_config(
             dataset_num_rows=dataset_num_rows,
         )
     elif isinstance(dataset_type, DpoDatasetType):
-        config_updated =make_dpo_config(
+        config_updated = make_dpo_config(
             model_id=model,
             model_size=model_size,
             remained_minutes=remained_minutes,
@@ -227,10 +225,10 @@ def create_config(
         config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
         config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
 
-    config['max_steps'] = 200
-    config['save_steps'] = 5
-    config['eval_steps'] = 5
-    config['val_set_size'] = 0.0001
+    # config['max_steps'] = 200
+    # config['save_steps'] = 5
+    # config['eval_steps'] = 5
+    # config['val_set_size'] = 0.0001
     # config['micro_batch_size'] = 2
     # config['eval_batch_size'] = 2
 
@@ -245,26 +243,12 @@ def run_training(config_path, model_id, hours_to_complete):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
+    vllm_proc = None
+    train_proc = None
     training_env = os.environ.copy()
     training_env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     training_env["HF_HUB_DISABLE_TELEMETRY"] = "1"
-
-    if my_cst.NUM_GPUS == 1:
-        training_command = [
-        "accelerate", "launch",
-        "-m", "axolotl.cli.train",
-        config_path
-        ]
-    else:
-        training_command = [
-            "accelerate",
-            "launch",
-            "--num-processes",
-            str(my_cst.NUM_GPUS),
-            "-m",
-            "axolotl.cli.train",
-            config_path,
-        ]
+    
     b_merge_lora = False
     b_overtime_training = False
     try:
@@ -273,32 +257,94 @@ def run_training(config_path, model_id, hours_to_complete):
         # current_job_train_limit_at = datetime.utcnow() + timedelta(seconds=500)
         logger.info(f'current_job_train_limit_at; {current_job_train_limit_at}')
         
-        process = subprocess.Popen(
-            training_command,
-            # stdout=subprocess.PIPE,
-            # stderr=subprocess.STDOUT,
-            # text=True,
-            # bufsize=1,
-            env=training_env
-        )
+        if my_cst.NUM_GPUS == 1:
+            train_proc = subprocess.Popen(
+                [
+                    "accelerate",
+                    "launch",
+                    "-m",
+                    "axolotl.cli.train",
+                    config_path,
+                    
+                ],
+                env=training_env
+            )
+        else:
+            if config.get("rl") == "grpo" and config.get('trl').get('use_vllm', False):
+                
+                half_gpus = my_cst.NUM_GPUS // 2
+                vllm_gpus = [i for i in range(half_gpus, my_cst.NUM_GPUS)]
+                str_vllm_gpus = ",".join(map(str, vllm_gpus))
+                vllm_env = os.environ.copy()
+                vllm_env["CUDA_VISIBLE_DEVICES"] = str_vllm_gpus
+                vllm_env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+                vllm_env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+                logger.info(f'starting vllm server on gpus: {str_vllm_gpus}')
+                vllm_proc = subprocess.Popen(
+                    [
+                        "axolotl",
+                        "vllm-serve",
+                        config_path
+                    ], 
+                    env=vllm_env
+                )
+                
+                train_gpus = [i for i in range(0, half_gpus)]
+                str_train_gpus=",".join(map(str, train_gpus))
+                training_env["CUDA_VISIBLE_DEVICES"] = str_train_gpus
+                logger.info(f'starting train server on gpus: {str_train_gpus}')
+                train_proc = subprocess.Popen(
+                    [
+                        "accelerate",
+                        "launch",
+                        "--num-processes",
+                        str(half_gpus),
+                        "-m",
+                        "axolotl.cli.train",
+                        config_path,
+                        
+                    ],
+                    env=training_env
+                )
+            else:
+                train_proc = subprocess.Popen(
+                    [
+                    "accelerate",
+                    "launch",
+                    "--num-processes",
+                    str(my_cst.NUM_GPUS),
+                    "-m",
+                    "axolotl.cli.train",
+                    config_path,
+                        
+                    ],
+                    env=training_env
+                )
 
         # for line in process.stdout:
         #     print(line, end="", flush=True)
         n_cnt = 0
-        while process.poll() is None:
+        while train_proc.poll() is None:
             if datetime.utcnow() > current_job_train_limit_at:
                 b_overtime_training = True
                 logger.info(f'current_job_train_limit_at; {current_job_train_limit_at}, process is terminating')
-                if not cleanup_gpu_proc(process):
+                if not cleanup_gpu_proc(train_proc):
                     logger.warning("Forcing train full GPU memory cleanup")
                     # As last resort, kill all Python processes using GPU
                     time.sleep(2)
-                    process.kill()
+                    train_proc.kill()
                     torch.cuda.empty_cache()
+                if vllm_proc:
+                    if not cleanup_gpu_proc(vllm_proc):
+                        logger.warning("Forcing vllm full GPU memory cleanup")
+                        # As last resort, kill all Python processes using GPU
+                        time.sleep(2)
+                        train_proc.kill()
+                        torch.cuda.empty_cache()
             logger.info(f'Waiting, n_cnt: {n_cnt} to complete...')
             n_cnt += 1
             time.sleep(10)  
-        return_code = process.wait()
+        return_code = train_proc.wait()
 
         if b_overtime_training:
             logger.error('Training was stopped due to timeout.')
@@ -366,16 +412,7 @@ def run_training(config_path, model_id, hours_to_complete):
             src_dir = f"{config['output_dir']}/merged"
             dest_dir = config['output_dir']
 
-            # Iterate over all items in the directory
-            for item in os.listdir(dest_dir):
-                item_path = os.path.join(dest_dir, item)
-
-                # Remove everything except the 'merged' directory
-                if item != 'merged':
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                    else:
-                        os.remove(item_path)
+            remove_contents_in_dir(dest_dir, ['merged'])
 
             for item in os.listdir(src_dir):
                 s = os.path.join(src_dir, item)
@@ -398,13 +435,8 @@ def run_training(config_path, model_id, hours_to_complete):
                 remove_contents_in_dir(dest_dir, [os.path.basename(src_dir)])
                 keep_files = ["adapter_config.json", "adapter_model.bin", "adapter_model.safetensors", ".gitattributes"]
                 remove_contents_in_dir(src_dir, keep_files)
-                for item in os.listdir(src_dir):
-                    s = os.path.join(src_dir, item)
-                    d = os.path.join(dest_dir, item)
-                    if os.path.isdir(s):
-                        shutil.copytree(s, d, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(s, d)
+                
+                copy_contents_to_dir(src_dir, dest_dir)
                 shutil.rmtree(src_dir)
 
         # os.remove(config_path)
@@ -412,7 +444,11 @@ def run_training(config_path, model_id, hours_to_complete):
         print("Training subprocess failed!", flush=True)
         print(f"Exit Code: {e.returncode}", flush=True)
         print(f"Command: {' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}", flush=True)
-        raise RuntimeError(f"Training subprocess failed with exit code {e.returncode}")
+        # raise RuntimeError(f"Training subprocess failed with exit code {e.returncode}")
+        src_dir = config['base_model']
+        dest_dir = config['output_dir']
+        ignore_patterns = ["checkpoint-*", "runs*", "adapter_config.json", "adapter_model.safetensors", "adapter_model.bin", "README.md", "*.msgpack", "*.ot"]
+        copy_contents_to_dir(src_dir, dest_dir)
 
 
 
@@ -474,8 +510,8 @@ async def main():
         int(args.hours_to_complete),
         args.expected_repo_name,
     )
-    NUM_GPUS=torch.cuda.device_count()
-    print(f"Number of GPUs available: {NUM_GPUS}", flush=True)
+    # NUM_GPUS=torch.cuda.device_count()
+    # print(f"Number of GPUs available: {NUM_GPUS}", flush=True)
     run_training(config_path, args.model, args.hours_to_complete)
 
     patch_model_metadata(output_dir, args.model)

@@ -1,6 +1,6 @@
 from scripts.my_logger import get_logger
-import scripts.my_constants as my_cst
-from scripts.my_utils import get_batch_checkpointing_info, get_train_and_eval_steps_from_data
+import scripts.my_constants as cst
+from scripts.my_utils import get_batch_checkpointing_info, get_train_and_eval_steps_from_data, get_liger_info, get_flash_attention_info
 import math
 from datetime import datetime
 from core.models.utility_models import GrpoDatasetType
@@ -37,33 +37,36 @@ def make_config(
     dataset_type: GrpoDatasetType | None = None,
 
 ):
-    # model_size = max(my_cst.MIN_MODEL_SIZE, model_size)
+    # model_size = max(cst.MIN_MODEL_SIZE, model_size)
     # logger.info(f'updated model size: {model_size}')
     #################### output
     
-    micro_batch_size = my_cst.MIN_MICRO_BATCH_SIZE
-    eval_batch_size = my_cst.MIN_EVAL_BATCH_SIZE
+    micro_batch_size = cst.MIN_MICRO_BATCH_SIZE
+    eval_batch_size = cst.MIN_EVAL_BATCH_SIZE
     gradient_checkpointing = False
-    max_steps = my_cst.MIN_MAX_STEPS
+    max_steps = cst.MIN_MAX_STEPS
     flash_attention = True
-    early_stopping_patience = my_cst.MIN_EARLY_STOPPING_PATIENCE
-    eval_steps = my_cst.DEFAULT_CHECKPOINT_STEPS
-    save_steps = my_cst.DEFAULT_CHECKPOINT_STEPS
+    early_stopping_patience = cst.MIN_EARLY_STOPPING_PATIENCE
+    eval_steps = cst.DEFAULT_CHECKPOINT_STEPS
+    save_steps = cst.DEFAULT_CHECKPOINT_STEPS
     lr_scheduler = 'constant'
     lr_scheduler_kwargs = None
-    sequence_len = my_cst.MIN_SEQUENCE_LEN
-    gradient_accumulation_steps = my_cst.MIN_ACCUMULATION_STEPS
-    num_epochs = my_cst.DEFAULT_NUM_EPOCHS
-    val_set_size = my_cst.DEFAULT_VAL_SET_SIZE
-    learning_rate = my_cst.DEFAULT_LEARNING_RATE
+    sequence_len = cst.MIN_SEQUENCE_LEN
+    gradient_accumulation_steps = cst.MIN_ACCUMULATION_STEPS
+    num_epochs = cst.DEFAULT_NUM_EPOCHS
+    val_set_size = cst.DEFAULT_VAL_SET_SIZE
+    learning_rate = cst.DEFAULT_LEARNING_RATE
     lora_dropout = 0.05
-    num_gpus = my_cst.NUM_GPUS
+    num_gpus = cst.NUM_GPUS
     reward_func_num = len(dataset_type.reward_functions)
 
     config = {}
     config_to_save = {}
     #################### sequence_len
-    
+    if model_conf is None or not isinstance(model_conf, dict):
+        logger.warning(f'model_conf is None return max_steps = -1')
+        config = { "max_steps": -1 }
+        return config
     max_sequence_len = min(4096, model_conf.get('max_position_embeddings', 1024))
     sequence_len = min(1024, max_sequence_len)
     logger.info(f'sequence_len: {sequence_len}')
@@ -82,12 +85,22 @@ def make_config(
     # config["trl"]["reward_funcs"] = [f"{filename}.{func_name}" for func_name in reward_funcs_names]
     # config["trl"]["reward_weights"] = [reward_function.reward_weight for reward_function in dataset_type.reward_functions]
     
-    if num_gpus <= 2 or model_size >= my_cst.LARGE_MODEL_SIZE or \
+    if num_gpus <= 2 or model_size >= cst.LARGE_MODEL_SIZE or \
         model_conf.get('num_attention_heads', 2) % 2 == 1 or \
-        'hermes' in model_id.lower() or \
-        'mistral' in model_id.lower() or \
-        model_conf.get('model_type', None) in ['mistral'] or \
-        model_id in ['unsloth/OpenHermes-2.5-Mistral-7B']:
+        model_id in [
+            'unsloth/OpenHermes-2.5-Mistral-7B', 
+            "defog/sqlcoder-7b-2",
+            "facebook/opt-350m",
+            "huggyllama/llama-7b",
+            'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
+            'dunzhang/stella_en_1.5B_v5',
+            "NousResearch/Meta-Llama-3-8B-Alternate-Tokenizer",
+            "elyza/Llama-3-ELYZA-JP-8B",
+            "Korabbit/llama-2-ko-7b",
+            "furiosa-ai/mlperf-gpt-j-6b",
+            "databricks/dolly-v2-3b",
+            'Eurdem/Defne_llama3_2x8B'] or \
+        model_conf.get('model_type', None) in ['mistral']:
         config["trl"]["use_vllm"] = False
     else:
         config["trl"]["vllm_server_host"] = "0.0.0.0"
@@ -114,7 +127,7 @@ def make_config(
     else:
         micro_batch_size = 2
         eval_batch_size = 2
-        if model_size >= my_cst.LARGE_MODEL_SIZE:
+        if model_size >= cst.LARGE_MODEL_SIZE:
             micro_batch_size = 1
             eval_batch_size = 1
 
@@ -126,51 +139,34 @@ def make_config(
     half_gpus = num_gpus // 2
     train_batch_size_total = half_gpus * micro_batch_size * gradient_accumulation_steps
     eval_batch_size_total = num_gpus * 4
+    
     if config["trl"]["use_vllm"] == False:
         train_batch_size_total = num_gpus * micro_batch_size * gradient_accumulation_steps
         eval_batch_size_total = num_gpus * eval_batch_size
+    
     logger.info(f'micro_batch_size: {micro_batch_size}, eval_batch_size: {eval_batch_size}, num_gpus: {num_gpus}, train_batch_size_total: {train_batch_size_total}, eval_batch_size_total: {eval_batch_size_total}')
+    
     num_generations = 4
     if eval_batch_size_total <= 2:
         num_generations = 2
         config["trl"]["num_generations"] = num_generations
     #################### flash attention, eager attention
-    flash_attention = True
+    flash_attention = get_flash_attention_info(model_id, model_conf)
     model_architecture = None
     if model_conf is not None and isinstance(model_conf, dict):  
         # Check if 'architectures' key exists and is a list  
         architectures = model_conf.get('architectures')  
         if architectures and isinstance(architectures, list):  
             model_architecture = architectures[0]  # Access the first architecture  
-            # Check if 'rope_scaling' exists and is also a dictionary  
-            rope_scaling = model_conf.get('rope_scaling')  
-            if rope_scaling and isinstance(rope_scaling, dict):  
-                rope_type = rope_scaling.get('type')  
-                if rope_type == 'yarn':  
-                    flash_attention = False  
-                    
-            flash_not_support_architectures = ['FalconForCausalLM', 'CodeGenForCausalLM', 'BloomForCausalLM', 'GPTNeoForCausalLM']
-            flash_support_archtectures = ['Qwen2ForCausalLM', 'GPTNeoXForCausalLM']
-            if model_architecture in flash_not_support_architectures:            
-                flash_attention = False
-            elif model_architecture in flash_support_archtectures:   
-                flash_attention = True
-    else:  
-        # Handle the case where model_conf is None or not structured as expected  
-        logger.error("Error: model_conf is not properly defined.")
-        
-    if 'codellama' in model_id.lower():
-        if 'unsloth' in model_id.lower():
-            flash_attention = True
-        else:
-            flash_attention = False
-    if 'unsloth' in model_id.lower():
-        flash_attention = True
-      
+    
     
     #################### train_steps_per_sec, eval_steps_per_sec
-    
-    adapter = 'lora' if model_size < my_cst.QLORA_MODEL_SIZE else 'qlora'
+    if model_architecture == 'GPTNeoXForCausalLM':
+        gradient_checkpointing = False
+        micro_batch_size = 1
+        eval_batch_size = 1
+        gradient_accumulation_steps = 4
+    adapter = 'lora' if model_size < cst.QLORA_MODEL_SIZE else 'qlora'
     train_steps_per_sec, eval_steps_per_sec = get_train_and_eval_steps_from_data(
         model_id = model_id,
         model_size = model_size,
@@ -188,24 +184,24 @@ def make_config(
     if reward_func_num is not None and reward_func_num > 3:
         b_ratio_reward_func_num = math.pow(1.25, reward_func_num / default_reward_func_num)
         b_ratio_reward_func_num = max(1, b_ratio_reward_func_num)
-    if model_size >= my_cst.EXTREMELY_LARGE_MODEL_SIZE:
+    if model_size >= cst.EXTREMELY_LARGE_MODEL_SIZE:
         
         train_steps_per_sec = train_steps_per_sec / 25.0 / b_ratio_reward_func_num
         eval_steps_per_sec = train_steps_per_sec * 1.2
-    elif model_size >= my_cst.LARGE_MODEL_SIZE:
+    elif model_size >= cst.LARGE_MODEL_SIZE:
         
         train_steps_per_sec = train_steps_per_sec / 13.0 / b_ratio_reward_func_num
         eval_steps_per_sec = train_steps_per_sec * 1.2
         
-    elif model_size >= my_cst.MEDIUM_MODEL_SIZE:
+    elif model_size >= cst.MEDIUM_MODEL_SIZE:
         train_steps_per_sec = train_steps_per_sec / 11.5 / b_ratio_reward_func_num
         eval_steps_per_sec = train_steps_per_sec * 1.2
 
-    elif model_size >= my_cst.SMALL_MODEL_SIZE:
+    elif model_size >= cst.SMALL_MODEL_SIZE:
         train_steps_per_sec = train_steps_per_sec / 8.5 / b_ratio_reward_func_num
         eval_steps_per_sec = train_steps_per_sec * 1.2
 
-    elif model_size >= my_cst.EXTREMELY_SMALL_MODEL_SIZE:
+    elif model_size >= cst.EXTREMELY_SMALL_MODEL_SIZE:
         train_steps_per_sec = train_steps_per_sec / 12.5 / b_ratio_reward_func_num
         eval_steps_per_sec = train_steps_per_sec * 1.2
     else:
@@ -256,12 +252,12 @@ def make_config(
     checkpoint_steps = min(1000, max(150, checkpoint_steps))
     logger.info(f'=========== checkpoint_steps: {checkpoint_steps}')
 
-    n_grpo_max_val_examples = my_cst.MAX_VAL_DATASET_EXAMPLES_GRPO_LARGE_INSTANCE if config["trl"]["use_vllm"] and rough_estimated_total_train_steps >= 1.2 * steps_per_epoch else my_cst.MAX_VAL_DATASET_EXAMPLES_GRPO_SMALL_INSTANCE
-    n_grpo_min_val_examples = my_cst.MIN_VAL_DATASET_EXAMPLES_GRPO_LARGE_INSTANCE if config["trl"]["use_vllm"] and rough_estimated_total_train_steps >= 1.2 * steps_per_epoch else my_cst.MIN_VAL_DATASET_EXAMPLES_GRPO_SMALL_INSTANCE
+    n_grpo_max_val_examples = cst.MAX_VAL_DATASET_EXAMPLES_GRPO_LARGE_INSTANCE if config["trl"]["use_vllm"] and rough_estimated_total_train_steps >= 1.2 * steps_per_epoch else cst.MAX_VAL_DATASET_EXAMPLES_GRPO_SMALL_INSTANCE
+    n_grpo_min_val_examples = cst.MIN_VAL_DATASET_EXAMPLES_GRPO_LARGE_INSTANCE if config["trl"]["use_vllm"] and rough_estimated_total_train_steps >= 1.2 * steps_per_epoch else cst.MIN_VAL_DATASET_EXAMPLES_GRPO_SMALL_INSTANCE
 
-    if dataset_num_rows * my_cst.DEFAULT_VAL_SET_SIZE > n_grpo_max_val_examples:
+    if dataset_num_rows * cst.DEFAULT_VAL_SET_SIZE > n_grpo_max_val_examples:
         val_set_size = n_grpo_max_val_examples / dataset_num_rows
-    if dataset_num_rows * my_cst.DEFAULT_VAL_SET_SIZE < n_grpo_min_val_examples:
+    if dataset_num_rows * cst.DEFAULT_VAL_SET_SIZE < n_grpo_min_val_examples:
         val_set_size = n_grpo_min_val_examples / dataset_num_rows
     val_set_size = max(min(1, val_set_size), 0)
 
@@ -283,8 +279,6 @@ def make_config(
     estimated_epochs = 0
     not_multiplied_estimated_epochs = 0
     checkpoint_times_multiplier = 1.0
-    b_dora_acceptable = False
-
 
     total_remained_sec_after_first_eval = total_remained_sec - estimated_eval_sec_per_checkpoint
     estimated_train_eval_sec_per_checkpoint = (estimated_eval_sec_per_checkpoint + estimated_train_sec_per_checkpoint) * 1.1
@@ -296,16 +290,31 @@ def make_config(
     logger.info(f'=========== steps_per_epoch: {steps_per_epoch}')
 
     estimated_epochs = max_steps / steps_per_epoch
-    if estimated_epochs > my_cst.MAX_EPOCHS:
-        max_steps = math.ceil(n_estimated_checkpoint_times * checkpoint_steps * my_cst.MAX_EPOCHS / estimated_epochs ) + 5
-        estimated_epochs = my_cst.MAX_EPOCHS
-        logger.warning(f'=========== estimated_epochs: {estimated_epochs} is too big, reduce to {my_cst.MAX_EPOCHS}, max_steps: {max_steps}')
+    if estimated_epochs < 3.0 and sequence_len >= 2048:
+        logger.warning(f'=========== adjusting sequence_len to 1024, estimated_epochs: {estimated_epochs} is too small, sequence_len: {sequence_len}')
+        sequence_len = 1024
+        n_estimated_checkpoint_times = math.ceil(n_estimated_checkpoint_times * 1.5) 
+        max_steps = math.ceil(n_estimated_checkpoint_times * checkpoint_steps) + 5
+        logger.info(f'=========== max_steps: {max_steps}')
+        estimated_epochs = max_steps / steps_per_epoch
+        logger.info(f'=========== estimated_epochs: {estimated_epochs}')
+    
+    if estimated_epochs > cst.MAX_EPOCHS:
+        logger.warning(f'=========== estimated_epochs: {estimated_epochs} is too big, reduce to {cst.MAX_EPOCHS}, max_steps: {max_steps}')
+        n_estimated_checkpoint_times = math.ceil(n_estimated_checkpoint_times * cst.MAX_EPOCHS / estimated_epochs)
+        max_steps = math.ceil(n_estimated_checkpoint_times * checkpoint_steps) + 5
+        estimated_epochs = cst.MAX_EPOCHS
     
     not_multiplied_estimated_epochs = estimated_epochs
-    logger.info(f'=========== estimated_epochs: {estimated_epochs}')
+    logger.info(f'=========== not_multiplied_estimated_epochs: {estimated_epochs}')
 
-    if estimated_epochs < 7.0:
+    if estimated_epochs < 0.5:
+        checkpoint_times_multiplier = 3.5
+    elif estimated_epochs < 1.0:
+        checkpoint_times_multiplier = 2.5
+    elif estimated_epochs < 5.0:
         checkpoint_times_multiplier = 1.5
+
     n_estimated_checkpoint_times = math.ceil(n_estimated_checkpoint_times * checkpoint_times_multiplier)
     if checkpoint_times_multiplier > 1.0:
         b_maximized = True
@@ -316,7 +325,7 @@ def make_config(
         estimated_epochs = max_steps / steps_per_epoch
         logger.info(f'=========== increase estimated_epochs: {estimated_epochs}')
 
-    early_stopping_patience = max( min(math.ceil(steps_per_epoch / checkpoint_steps), 10), my_cst.MIN_EARLY_STOPPING_PATIENCE)
+    early_stopping_patience = max( min(math.ceil(steps_per_epoch / checkpoint_steps), 10), cst.MIN_EARLY_STOPPING_PATIENCE)
 
     learning_rate = 5e-6
 
@@ -363,25 +372,25 @@ def make_config(
             lr_scheduler_kwargs = {
                 'min_lr_rate': 0.01
             }
-    if 'qwen' in model_id.lower() or model_conf.get('model_type', None) in ['qwen2', 'qwen2_5_vl', 'qwen2_vl', 'qwen3']:
-        if not_multiplied_estimated_epochs <= 1:
-            learning_rate = 2e-5
-            lr_scheduler = 'constant'
-        elif not_multiplied_estimated_epochs <= 1.5:
-            learning_rate = 2e-5
-            lr_scheduler = 'cosine_with_min_lr'
-            lr_scheduler_kwargs = {
-                'min_lr_rate': 0.3
-            }
-        else:
-            learning_rate = 2e-5
-            lr_scheduler = 'cosine_with_min_lr'
-            lr_scheduler_kwargs = {
-                'min_lr_rate': 0.01
-            }
+    # if 'qwen' in model_id.lower() or model_conf.get('model_type', None) in ['qwen2', 'qwen2_5_vl', 'qwen2_vl', 'qwen3']:
+    #     if not_multiplied_estimated_epochs <= 1:
+    #         learning_rate = 2e-5
+    #         lr_scheduler = 'constant'
+    #     elif not_multiplied_estimated_epochs <= 1.5:
+    #         learning_rate = 2e-5
+    #         lr_scheduler = 'cosine_with_min_lr'
+    #         lr_scheduler_kwargs = {
+    #             'min_lr_rate': 0.3
+    #         }
+    #     else:
+    #         learning_rate = 2e-5
+    #         lr_scheduler = 'cosine_with_min_lr'
+    #         lr_scheduler_kwargs = {
+    #             'min_lr_rate': 0.01
+    #         }
     #################### customize lora
-    lora_r = 256 if model_size < my_cst.LARGE_MODEL_SIZE else 128
-    lora_alpha = 512 if model_size < my_cst.LARGE_MODEL_SIZE else 256
+    lora_r = 256 if model_size < cst.LARGE_MODEL_SIZE else 128
+    lora_alpha = 512 if model_size < cst.LARGE_MODEL_SIZE else 256
     optimizer = 'adamw_bnb_8bit'
     
     config['adapter'] = adapter
@@ -412,7 +421,8 @@ def make_config(
             'adam_epsilon': 1e-8
         }
         config['lora_target_linear'] = True
-   
+        if model_size < cst.LARGE_MODEL_SIZE:
+            config['peft_init_lora_weights'] ='eva'
         if 'torch_dtype' in model_conf and model_conf['torch_dtype'] == 'bfloat16':
             config['bf16'] = True
             if adapter == 'qlora':
@@ -432,7 +442,8 @@ def make_config(
             'adam_epsilon': 1e-8
         }
         config['lora_target_linear'] = True
-
+        if model_size < cst.LARGE_MODEL_SIZE:
+            config['peft_init_lora_weights'] ='eva'
         if adapter == 'qlora':
             config['load_in_4bit'] = True
             if 'model_type' in model_conf and model_conf['model_type'] in ['deepseek_v3', 'deepseek_v2']:
@@ -482,7 +493,13 @@ def make_config(
         #     config['fsdp'] = fsdp
         #     config['fsdp_config'] = fsdp_config
         
-  
+    if get_liger_info(model_conf):
+        config['plugins'] = ['axolotl.integrations.liger.LigerPlugin']
+        config['liger_rope'] = True
+        config['liger_rms_norm'] = True
+        config['liger_glu_activation'] = True
+        config['liger_layer_norm'] = True          
+
     max_grad_norm = 1.0
     config['num_epochs'] = 10
     config['lora_dropout'] = lora_dropout
